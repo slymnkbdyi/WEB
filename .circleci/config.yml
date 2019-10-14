@@ -1,0 +1,379 @@
+defaults: &defaults
+  working_directory: /webrtc-streamer
+  docker:
+    - image: heroku/heroku:18
+    
+version: 2
+jobs:
+  # -------------------------------------
+  # dowload common tools 
+  # -------------------------------------
+  setup:
+    <<: *defaults
+    
+    environment:
+      WEBRTCROOT: /webrtc 
+
+    steps:     
+      - run: apt-get update; apt-get install -y --no-install-recommends autoconf automake libtool git make g++ xz-utils
+      - run: git clone --depth 1 https://chromium.googlesource.com/chromium/tools/depot_tools.git /depot_tools
+      - run: echo 'export PATH=/depot_tools:$PATH' >> $BASH_ENV
+      - run: mkdir ${WEBRTCROOT} && cd ${WEBRTCROOT} && fetch --no-history --nohooks webrtc 
+      - run: cd ${WEBRTCROOT} && sed -i -e "s|'src/resources'],|'src/resources'],'condition':'rtc_include_tests==true',|" src/DEPS 
+
+      - persist_to_workspace:
+          root: /
+          paths:
+            - depot_tools 
+            - webrtc
+            
+  # -------------------------------------
+  # build x86_64
+  # -------------------------------------
+  build_x86_64:
+    <<: *defaults
+    
+    environment:
+      TAR_OPTIONS: --no-same-owner
+      WEBRTCROOT: /webrtc 
+
+    steps:
+      - attach_workspace:
+          at: /          
+      - checkout
+      - run: apt-get update; apt-get install -y --no-install-recommends autoconf automake libtool git cmake make g++ xz-utils libgtk-3-dev libasound2-dev
+      - run: echo 'export PATH=/depot_tools:$PATH' >> $BASH_ENV
+      - run: cd ${WEBRTCROOT} && gclient sync 
+      
+      - run: cmake . && make && cpack 
+
+      - run: mkdir /distrib && cp webrtc-streamer*.tar.gz /distrib
+      - persist_to_workspace:
+          root: /
+          paths:
+            - distrib 
+            
+  # -------------------------------------
+  # build x86_64 without desktop without sound feature
+  # -------------------------------------
+  build_heroku:
+    <<: *defaults
+    
+    environment:
+      TAR_OPTIONS: --no-same-owner
+      WEBRTCROOT: /webrtc 
+
+    steps:
+      - attach_workspace:
+          at: /          
+      - checkout
+      - run: apt-get update; apt-get install -y --no-install-recommends autoconf automake libtool git cmake make g++ xz-utils 
+      - run: echo 'export PATH=/depot_tools:$PATH' >> $BASH_ENV
+      - run: cd ${WEBRTCROOT} && gclient sync 
+
+      - run: cmake . && make && cpack 
+      - run: mv webrtc-streamer*.tar.gz webrtc-streamer-heroku.tar.gz
+
+      - run: mkdir /distrib && cp webrtc-streamer*.tar.gz /distrib
+      - persist_to_workspace:
+          root: /
+          paths:
+            - distrib
+
+  # -------------------------------------
+  # deploy to heroku
+  # -------------------------------------
+  deploy_heroku:
+    <<: *defaults
+
+    steps:
+      - attach_workspace:
+          at: /
+
+      - checkout
+      - run:
+          name: Setup Heroku
+          command: |  
+            ssh-keyscan -H heroku.com >> ~/.ssh/known_hosts
+            cat > ~/.netrc << EOF
+            machine api.heroku.com
+              login $HEROKU_LOGIN
+              password $HEROKU_API_KEY
+            EOF
+            cat >> ~/.ssh/config << EOF
+            VerifyHostKeyDNS yes
+            StrictHostKeyChecking no
+            EOF
+      - add_ssh_keys:
+          fingerprints:
+            - "9d:ef:66:ee:e1:95:2b:e6:98:05:01:ac:48:5c:53:be"
+      - deploy:
+          name: "Deploy to Heroku"
+          command: |
+            git clone git@heroku.com:webrtc-streamer.git
+            cd webrtc-streamer
+            tar xzf /distrib/webrtc-streamer*heroku.tar.gz --strip=1
+            git add -A && git -c user.name='ci' -c user.email='ci@email.org' commit -m 'heroku deployement' && git push --force git@heroku.com:webrtc-streamer.git HEAD:refs/heads/master
+
+  deploy_cf:
+    <<: *defaults
+
+    steps:
+      - attach_workspace:
+          at: /
+
+      - run:
+         name: Setup CF CLI
+         command: |
+           curl -L "https://packages.cloudfoundry.org/stable?release=linux64-binary&source=github" | tar -zx 
+           ./cf api $CF_URL
+           ./cf auth $CF_USER $CF_PASSWORD
+           ./cf target -o $CF_ORG -s $CF_SPACE
+
+      - deploy:
+          name: "Deploy to cloudfoundry"
+          command: ./cf push webrtc-streamer -p /distrib/webrtc-streamer*heroku.zip -c './webrtc-streamer -C config.json -a' -b binary_buildpack -m 256m -k 256m -s cflinuxfs3
+
+
+  # -------------------------------------
+  # build for RPI2
+  # -------------------------------------
+  build_rpi_armv7:
+    <<: *defaults
+    
+    environment:
+      TAR_OPTIONS: --no-same-owner
+      WEBRTCROOT: /webrtc 
+      CROSSCOMPILER: https://sourceforge.net/projects/raspberry-pi-cross-compilers/files/Raspberry%20Pi%20GCC%20Cross-Compiler%20Toolchains/GCC%209.1.0/Raspberry%20Pi%202%2C%203/cross-gcc-9.1.0-pi_2-3.tar.gz
+
+    steps:
+      - attach_workspace:
+          at: /
+      - checkout
+      - run: apt-get update; apt-get install -y --no-install-recommends autoconf automake libtool git make cmake g++ xz-utils 
+      - run: wget -qO- ${CROSSCOMPILER} | tar xz -C /opt 
+      - run: echo "export PATH=$(ls -d /opt/cross-pi-gcc-*/bin):\$PATH" >> $BASH_ENV
+      - run: cat $BASH_ENV
+      - run: which arm-linux-gnueabihf-gcc
+      - run: echo 'export PATH=/depot_tools:$PATH' >> $BASH_ENV
+      - run: ${WEBRTCROOT}/src/build/linux/sysroot_scripts/install-sysroot.py --arch=arm
+      - run: cd ${WEBRTCROOT} && gclient sync
+
+      - run: cmake -DCMAKE_SYSTEM_PROCESSOR=armv7l -DCMAKE_SYSTEM_NAME=Linux -DCMAKE_C_COMPILER=arm-linux-gnueabihf-gcc -DCMAKE_CXX_COMPILER=arm-linux-gnueabihf-g++ -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ONLY -DWEBRTCDESKTOPCAPTURE=OFF . && make 
+      - run: cpack
+
+      - run: mkdir /distrib && cp webrtc-streamer*.tar.gz /distrib
+      - persist_to_workspace:
+          root: /
+          paths:
+            - distrib 
+
+  # -------------------------------------
+  # build for RPI1/B
+  # -------------------------------------
+  build_rpi_armv6:
+    <<: *defaults
+    
+    environment:
+      TAR_OPTIONS: --no-same-owner
+      WEBRTCROOT: /webrtc 
+      CROSSCOMPILER: https://sourceforge.net/projects/raspberry-pi-cross-compilers/files/Raspberry%20Pi%20GCC%20Cross-Compiler%20Toolchains/GCC%209.1.0/Raspberry%20Pi%201%2C%20Zero/cross-gcc-9.1.0-pi_0-1.tar.gz
+
+    steps:
+      - attach_workspace:
+          at: /
+      - checkout
+      - run: apt-get update; apt-get install -y --no-install-recommends autoconf automake libtool git cmake make g++ xz-utils
+      - run: wget -qO- ${CROSSCOMPILER} | tar xz -C /opt 
+      - run: echo "export PATH=$(ls -d /opt/cross-pi-gcc-*/bin):\$PATH" >> $BASH_ENV
+      - run: echo 'export PATH=/depot_tools:$PATH' >> $BASH_ENV
+      - run: cd ${WEBRTCROOT} && gclient sync 
+
+      - run: cmake -DCMAKE_SYSTEM_PROCESSOR=armv6l -DCMAKE_SYSTEM_NAME=Linux -DCMAKE_C_COMPILER=arm-linux-gnueabihf-gcc -DCMAKE_CXX_COMPILER=arm-linux-gnueabihf-g++ -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ONLY -DWEBRTCDESKTOPCAPTURE=OFF . && make 
+      - run: cpack
+
+      - run: mkdir /distrib && cp webrtc-streamer*.tar.gz /distrib
+      - persist_to_workspace:
+          root: /
+          paths:
+            - distrib 
+
+
+  # -------------------------------------
+  # store artifact in circleci
+  # -------------------------------------
+  store_artifact:
+    <<: *defaults
+    
+    steps:
+      - attach_workspace:
+          at: /
+      - store_artifacts:
+          path: /distrib
+          
+  # -------------------------------------
+  # publish artifact on github
+  # -------------------------------------
+  github_release:
+    <<: *defaults
+    
+    steps:
+      - attach_workspace:
+          at: /
+      - run: curl https://storage.googleapis.com/golang/go1.8.linux-amd64.tar.gz | tar -C /usr/local -xzf -
+      - run: echo 'export PATH=/usr/local/go/bin:/root/go/bin:$PATH' >> $BASH_ENV      
+      - run: go get github.com/tcnksm/ghr
+      - deploy:
+          name: "Deploy to Github"
+          command: ghr -t $GITHUB_TOKEN -u $CIRCLE_PROJECT_USERNAME -r $CIRCLE_PROJECT_REPONAME $CIRCLE_TAG /distrib
+
+  # -------------------------------------
+  # publish docker amd64
+  # -------------------------------------
+  publish_docker_linuxamd64:
+    machine:
+      docker_layer_caching: true
+    steps:
+      - checkout  
+      - run: git submodule update --init
+      - run:
+          command: |
+            export TAG=${CIRCLE_TAG:-circle-latest}
+            docker login --username=$DOCKERHUB_USER --password=$DOCKERHUB_PASS
+            docker build --pull -t $CIRCLE_PROJECT_USERNAME/$CIRCLE_PROJECT_REPONAME:${TAG}-amd64 -f Dockerfile .
+            docker push $CIRCLE_PROJECT_USERNAME/$CIRCLE_PROJECT_REPONAME:${TAG}-amd64
+
+  # -------------------------------------
+  # publish docker arm
+  # -------------------------------------
+  publish_docker_linuxarm32v7:
+    machine:
+      docker_layer_caching: true
+    steps:
+      - checkout  
+      - run: git submodule update --init
+      - run:
+          command: |
+            export TAG=${CIRCLE_TAG:-circle-latest}
+            docker login --username=$DOCKERHUB_USER --password=$DOCKERHUB_PASS
+            docker build --build-arg ARCH=armv7l --build-arg CROSSCOMPILER=https://sourceforge.net/projects/raspberry-pi-cross-compilers/files/Raspberry%20Pi%20GCC%20Cross-Compiler%20Toolchains/GCC%209.1.0/Raspberry%20Pi%202%2C%203/cross-gcc-9.1.0-pi_2-3.tar.gz --build-arg IMAGE=balenalib/raspberry-pi2 --pull -t $CIRCLE_PROJECT_USERNAME/$CIRCLE_PROJECT_REPONAME:${TAG}-arm32v7 -f Dockerfile.rpi .
+            docker push $CIRCLE_PROJECT_USERNAME/$CIRCLE_PROJECT_REPONAME:${TAG}-arm32v7
+
+  # -------------------------------------
+  # publish docker arm
+  # -------------------------------------
+  publish_docker_linuxarm32v6:
+    machine:
+      docker_layer_caching: true
+    steps:
+      - checkout  
+      - run: git submodule update --init
+      - run:
+          command: |
+            export TAG=${CIRCLE_TAG:-circle-latest}
+            docker login --username=$DOCKERHUB_USER --password=$DOCKERHUB_PASS
+            docker build --pull -t $CIRCLE_PROJECT_USERNAME/$CIRCLE_PROJECT_REPONAME:${TAG}-arm32v6 -f Dockerfile.rpi . 
+            docker push $CIRCLE_PROJECT_USERNAME/$CIRCLE_PROJECT_REPONAME:${TAG}-arm32v6
+
+  # -------------------------------------
+  # publish docker manifest
+  # -------------------------------------
+  publish_docker_multiarch:
+    machine:
+      image: circleci/classic:201808-01
+    steps:
+      - run:
+          command: |
+            mkdir $HOME/.docker
+            sh -c 'echo "{ \"experimental\": \"enabled\" }" >> $HOME/.docker/config.json'
+            #
+            docker login --username=$DOCKERHUB_USER --password=$DOCKERHUB_PASS
+            export TAG=${CIRCLE_TAG:-circle-latest}
+            docker manifest create --amend $CIRCLE_PROJECT_USERNAME/$CIRCLE_PROJECT_REPONAME:${TAG} $CIRCLE_PROJECT_USERNAME/$CIRCLE_PROJECT_REPONAME:${TAG}-amd64 $CIRCLE_PROJECT_USERNAME/$CIRCLE_PROJECT_REPONAME:${TAG}-arm32v7 $CIRCLE_PROJECT_USERNAME/$CIRCLE_PROJECT_REPONAME:${TAG}-arm32v6
+            docker manifest annotate $CIRCLE_PROJECT_USERNAME/$CIRCLE_PROJECT_REPONAME:${TAG} $CIRCLE_PROJECT_USERNAME/$CIRCLE_PROJECT_REPONAME:${TAG}-arm32v7 --os linux --arch arm --variant v7
+            docker manifest annotate $CIRCLE_PROJECT_USERNAME/$CIRCLE_PROJECT_REPONAME:${TAG} $CIRCLE_PROJECT_USERNAME/$CIRCLE_PROJECT_REPONAME:${TAG}-arm32v6 --os linux --arch arm --variant v6
+            docker manifest push $CIRCLE_PROJECT_USERNAME/$CIRCLE_PROJECT_REPONAME:${TAG} -p
+
+workflows:
+  version: 2
+  build:
+    jobs:
+      - setup:
+          filters:
+            tags:
+              only: /.*/            
+      - build_x86_64:
+          requires:
+            - setup
+          filters:
+            tags:
+              only: /.*/            
+      - build_heroku:
+          requires:
+            - setup
+          filters:
+            tags:
+              only: /.*/            
+      - build_rpi_armv7:
+          requires:
+            - setup
+          filters:
+            tags:
+              only: /.*/            
+      - build_rpi_armv6:
+          requires:
+            - setup
+          filters:
+            tags:
+              only: /.*/            
+      - store_artifact:
+          requires:
+            - build_x86_64
+            - build_heroku
+            - build_rpi_armv7
+            - build_rpi_armv6
+          filters:
+            tags:
+              only: /.*/            
+      - deploy_heroku:
+          requires:
+            - build_heroku
+          filters:
+            tags:
+              only: /.*/
+#      - deploy_cf:
+#          requires:
+#            - build_heroku
+#          filters:
+#            tags:
+#              only: /.*/
+      - github_release:
+          requires:
+            - store_artifact
+          filters:
+            branches:
+              ignore: /.*/
+            tags:
+              only: /.*/
+  docker:
+    jobs:
+      - publish_docker_linuxamd64:
+          filters:
+            tags:
+              only: /.*/            
+      - publish_docker_linuxarm32v6:
+          filters:
+            tags:
+              only: /.*/            
+      - publish_docker_linuxarm32v7:
+          filters:
+            tags:
+              only: /.*/            
+      - publish_docker_multiarch:
+          requires:
+            - publish_docker_linuxamd64
+            - publish_docker_linuxarm32v6
+            - publish_docker_linuxarm32v7
+          filters:
+            tags:
+              only: /.*/            

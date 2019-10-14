@@ -1,0 +1,61 @@
+dist: bionic
+env:
+  matrix:
+    - |
+      CMAKE_OPTIONS=
+    - |
+      CMAKE_OPTIONS='-DCMAKE_SYSTEM_PROCESSOR=armv6l -DCMAKE_SYSTEM_NAME=Linux -DCMAKE_C_COMPILER=arm-linux-gnueabihf-gcc -DCMAKE_CXX_COMPILER=arm-linux-gnueabihf-g++ -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ONLY -DWEBRTCDESKTOPCAPTURE=OFF'
+    - |
+      CMAKE_OPTIONS='-DCMAKE_SYSTEM_PROCESSOR=armv7l -DCMAKE_SYSTEM_NAME=Linux -DCMAKE_C_COMPILER=arm-linux-gnueabihf-gcc -DCMAKE_CXX_COMPILER=arm-linux-gnueabihf-g++ -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ONLY -DWEBRTCDESKTOPCAPTURE=OFF'
+language: cpp
+compiler:
+- gcc
+script:
+- sudo apt-get install --no-install-recommends -y libgtk-3-dev libasound2-dev crossbuild-essential-armhf
+# get toolchain
+- git clone --depth 1 https://chromium.googlesource.com/chromium/tools/depot_tools.git && export PATH=$PATH:$(pwd)/depot_tools
+# get WebRTC
+- mkdir ../webrtc
+- pushd ../webrtc
+- travis_wait 30 fetch --no-history --nohooks webrtc
+# patch webrtc to not download chromium-webrtc-resources
+- sed -i -e "s|'src/resources'],|'src/resources'],'condition':'rtc_include_tests==true',|" src/DEPS
+# get arm sysroot
+- src/build/linux/sysroot_scripts/install-sysroot.py --arch=arm
+# get WebRTC dependencies
+- travis_wait 30 gclient sync
+- popd
+# build
+- echo CMAKE_OPTIONS=${CMAKE_OPTIONS}
+- cmake ${CMAKE_OPTIONS} . && make && cpack
+before_deploy:
+- export RELEASE_PKG_FILE=$(ls *.tar.gz)
+- echo "RELEASE_PKG_FILE=${RELEASE_PKG_FILE}"   
+#deploy:
+#- provider: heroku
+#  skip_cleanup: true
+#  api_key:
+#    secure: NmTNf38MkoWWQZrRkXyWqCdRRO4Xjv+Kl0TOZPw+qCXva4kc2T0uwSi2o4YNZBUA533NyZvO6IJMQOpx24UkjPhxVv591FBB+HdUevOxD4SEAE8fBibpHVX3sTU0XLp/mx+BpNFdxKrEHHzoyBZBFjesQVVMVczB4AOv/KZerGw=
+#  on:
+#    repo: mpromonet/webrtc-streamer
+#    condition: $GYP_GENERATOR_OUTPUT = x86_64
+#- provider: releases
+#  skip_cleanup: true
+#  api_key:
+#    secure: FMXzmhBmuy7Jou3h5lG10b8xl5oqI96aYoUrUHO2rfKqQ4UMKxT3hXcdxOnSsnbI6d8NfXbOPKqmqmD4vTk+EqQjCK9fmsNxAg1UktLIsuOxoWmEWYLK5d3xpIuRmfRQDtPVjcryrE420FCfZS67lyr22+v1pLcvcD61ebGZLCg=
+#  file: 
+#  - "${RELEASE_PKG_FILE}"
+#  on:
+#    repo: mpromonet/webrtc-streamer
+#    tags: true
+
+jobs:
+  include:
+    - stage: docker
+      os: windows 
+      script:
+        - docker info
+        - travis_wait 30 docker build -f Dockerfile.windows .
+stages:
+  - docker
+  - test

@@ -1,0 +1,56 @@
+environment:
+  matrix:
+    - APPVEYOR_BUILD_WORKER_IMAGE: Ubuntu1804
+    - APPVEYOR_BUILD_WORKER_IMAGE: Visual Studio 2017
+      CLANG_VERSION: ToT
+      MSVC_SETUP_PATH: C:\Program Files (x86)\Microsoft Visual Studio\2017\Community\VC\Auxiliary\Build\vcvarsall.bat
+      MSVC_SETUP_ARG: x64
+      DEPOT_TOOLS_WIN_TOOLCHAIN: 0
+
+platform: x64
+
+configuration:
+  - Release
+  - Debug
+
+install:
+  - cmd: set PATH=%APPVEYOR_BUILD_FOLDER%\depot_tools;%PATH%
+  - sh: export PATH=${APPVEYOR_BUILD_FOLDER}/depot_tools:${PATH}
+  - cmd: set
+  - sh: env
+  - sh: df -h
+  - sh: sudo apt-get clean && sudo rm -rf /var/lib/apt/lists/ && sudo apt-get update && sudo apt-get install -y --no-install-recommends autoconf automake libtool xz-utils libgtk-3-dev libasound2-dev
+  - git clone --depth 1 https://chromium.googlesource.com/chromium/tools/depot_tools.git 
+  - mkdir webrtc
+  - cd webrtc
+  - fetch --no-history --nohooks webrtc 
+  - cd src
+  - ps: echo CONFIGURATION=$env:CONFIGURATION PLATFORM=$env:PLATFORM
+  - ps: (get-content DEPS) | foreach-object {$_ -replace "'src/resources'],", "'src/resources'],'condition':'rtc_include_tests==true',"} | set-content DEPS
+  - gclient sync
+
+before_build:
+  - cmd: call "%MSVC_SETUP_PATH%" %MSVC_SETUP_ARG%
+  - ps: cd $env:APPVEYOR_BUILD_FOLDER
+  - cmd: cmake -G Ninja -D WEBRTCBUILD=%CONFIGURATION% -DWEBRTCROOT=%APPVEYOR_BUILD_FOLDER:\=/%/webrtc -DCMAKE_C_COMPILER=clang-cl.exe -DCMAKE_CXX_COMPILER=clang-cl.exe .
+  - sh: cmake -G Ninja -D WEBRTCBUILD=${CONFIGURATION} -DWEBRTCROOT=${APPVEYOR_BUILD_FOLDER}/webrtc .
+
+build_script:
+  - ninja
+
+after_build:
+  - ps: cpack -C "$env:CONFIGURATION"
+
+artifacts:
+  - path: webrtc-streamer*.tar.gz
+
+deploy:
+  provider: GitHub
+  auth_token:
+    secure: Ov3sAkiU1iRjAOc7GYaScSUujzhKiTCz/gZ4uQws2fTaNu8O5FUciAQk4uuGeiC7
+  draft: false
+  prerelease: false
+  on:
+    branch: master                 
+    APPVEYOR_REPO_TAG: true       
+
